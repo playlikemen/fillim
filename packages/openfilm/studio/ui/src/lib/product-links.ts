@@ -2,16 +2,16 @@ import type { Language } from '@/i18n';
 
 /** Public destinations used by the app menu. */
 export const PRODUCT_LINKS = {
-  docs: 'https://openfilm.dev/docs/',
-  github: 'https://github.com/openfilm/openfilm',
-  feedback: 'https://github.com/openfilm/openfilm/issues/new/choose',
+  docs: 'https://github.com/playlikemen/fillim#readme',
+  github: 'https://github.com/playlikemen/fillim',
+  feedback: 'https://github.com/playlikemen/fillim/issues/new/choose',
 } as const;
 
 export function communityChannels(language: Language) {
   const discord = language === 'zh-CN' ? 'https://discord.gg/dgk4MtNWFZ' : 'https://discord.gg/a462Rs88hF';
   return [
     { id: 'discord', href: discord },
-    { id: 'github', href: 'https://github.com/openfilm/openfilm/discussions' },
+    { id: 'github', href: 'https://github.com/playlikemen/fillim/discussions' },
   ] as const;
 }
 

@@ -16,6 +16,7 @@ dist/
 
 # local settings and secrets
 .env*
+.neon
 
 # OS and editors
 .DS_Store

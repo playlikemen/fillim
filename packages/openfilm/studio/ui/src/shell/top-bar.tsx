@@ -12,12 +12,12 @@
  * `topBar`), after the edit's. The layout's menu (shell/layout) is the page's: it is the first of the buttons on the right.
  */
 import * as React from 'react';
-import { MonitorDown, Puzzle } from 'lucide-react';
+import { LayoutGrid, MonitorDown, Puzzle } from 'lucide-react';
 import { api, ApiError, type ProjectFilm } from '@/api';
 import { useT } from '@/i18n';
 import { readCanvasDoc } from '@/lib/canvas';
 import { studioHost } from '@/lib/host';
-import { leaveProject, openProject } from '@/lib/navigate';
+import { go, leaveProject, openProject } from '@/lib/navigate';
 import { AppMenu } from '@/components/AppMenu';
 import { DesktopDialog } from '@/components/DesktopDialog';
 import { PLUGIN_ICONS } from '@/components/library/PluginsPane';
@@ -138,6 +138,16 @@ function Bar({ frame, loaded }: { frame: ReturnType<typeof useProjectFrame>; loa
       <div className={studioHost?.tabs ? tabStyles.system : 'pointer-events-auto relative flex min-w-0 items-center'}><AppMenu onSettings={setSettingsOpen} /></div>
       {studioHost?.tabs ? <ProjectTabs current={projectTitle} onProjects={() => setProjectsOpen(true)} onRenameCurrent={startRename} onCoverCurrent={coverFromFrame} /> : null}
       <div className="pointer-events-auto relative flex min-w-0 items-center gap-1">
+        {!studioHost && !new URLSearchParams(location.search).has('key') && (
+          <button
+            type="button"
+            onClick={() => go('/projects')}
+            className="flex h-[26px] shrink-0 items-center gap-1.5 rounded-md px-2 text-[12px] font-medium text-[var(--text-muted)] transition hover:bg-[var(--bg-hover)] hover:text-[var(--text)]"
+          >
+            <LayoutGrid size={13} />
+            Workspace
+          </button>
+        )}
         <UpdateButton />
         <WebUpdateButton />
         {!studioHost && <Tooltip label={t('desktop.title')} side="bottom">

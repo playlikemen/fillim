@@ -121,25 +121,28 @@ export function servable(root, plain) {
 /**
  * The film origin's server, not listening yet: the files of the folder each token reaches (`rootOf`, null for none),
  * answered as the module's head says. `editorOrigin`: the only origin its pages answer, and that may read them.
- * @param {{ editorOrigin: string, rootOf: (token: string) => string | null | Promise<string | null> }} options
+ * @param {{ editorOrigin: string, publicEditorOrigin?: string, rootOf: (token: string) => string | null | Promise<string | null> }} options
  */
-export function filmServer({ editorOrigin, rootOf }) {
+export function filmServer({ editorOrigin, publicEditorOrigin = '', rootOf }) {
+  const editors = [editorOrigin, ...publicEditorOrigin.split(',').map((s) => s.trim()).filter(Boolean)];
+  const editorValue = editors.length > 1 ? editors : editorOrigin;
   /* read by the editor (its mixer fetches the media). Framed by it with no frame-ancestors rule: that rule is checked
      against every frame up to the window, so Studio shown inside another app's frame (an agent's preview pane) would
      lose its picture; a page is reached only through its project's token, which only the editor has */
-  const policy = () => ({
-    'access-control-allow-origin': editorOrigin,
+  const policy = (/** @type {import('node:http').IncomingMessage | undefined} */ req) => ({
+    'access-control-allow-origin': req?.headers.origin && editors.includes(req.headers.origin) ? req.headers.origin : editorOrigin,
+    ...(editors.length > 1 ? { vary: 'origin' } : {}),
     'x-content-type-options': 'nosniff',
   });
   /* Studio's scripts, told the editor's origin (the only one they answer) */
-  const scripts = (/** @type {string[]} */ ...list) => list.map((js) => `<script>${js.replaceAll('__EDITOR__', JSON.stringify(editorOrigin))}</script>`).join('');
+  const scripts = (/** @type {string[]} */ ...list) => list.map((js) => `<script>${js.replaceAll('__EDITOR__', JSON.stringify(editorValue))}</script>`).join('');
   /* the timeline page (the preview) gets the bridge and the stage; a web page gets the bridge too, so the editor can
      play one on its own (the media pane's viewer) — inside the timeline it stays quiet: its parent is not the editor */
   const filesOf = (/** @type {string} */ root) => folderFiles(root, {
     inject: `<script>${HOST_FLAG}${PAGE_SCALE}</script>${scripts(BRIDGE)}`,
     timelineInject: `<script>${HOST_FLAG}</script>${scripts(BRIDGE, STAGE)}`,
-    staleRevisionPage: `<!doctype html>${scripts("parent.postMessage({ source: 'openfilm-film', type: 'revision-stale' }, __EDITOR__);")}`,
-    headers: policy(),
+    staleRevisionPage: `<!doctype html>${scripts("(() => { const list = Array.isArray(__EDITOR__) ? __EDITOR__ : [__EDITOR__]; const ref = (() => { try { return document.referrer ? new URL(document.referrer).origin : ''; } catch { return ''; } })(); const target = (ref && list.includes(ref) ? ref : '') || (location.protocol === 'https:' && list.find((o) => o.startsWith('https://'))) || list[0]; parent.postMessage({ source: 'openfilm-film', type: 'revision-stale' }, target); })();")}`,
+    headers: (req) => policy(req),
     /* heavy footage is played from its proxy once it is made, while proxies are on, and footage the editor's browser
        does not decode whether they are or not (proxies.mjs); else from a copy made for footage a render's browser does
        not decode, or that seeks slowly (src/seekable.mjs), when there is one (looked for again each time: copies are
@@ -158,7 +161,7 @@ export function filmServer({ editorOrigin, rootOf }) {
   });
 
   /** a project's playable copies (UNPLAYABLE), served as its files are */
-  const copiesOf = (/** @type {string} */ root) => folderFiles(join(root, PLAYABLE_DIR), { headers: policy() });
+  const copiesOf = (/** @type {string} */ root) => folderFiles(join(root, PLAYABLE_DIR), { headers: (req) => policy(req) });
 
   /** each token's folder and its files, as last reached @type {Map<string, { root: string, files: ReturnType<typeof folderFiles> }>} */
   const byToken = new Map();
@@ -170,7 +173,7 @@ export function filmServer({ editorOrigin, rootOf }) {
   };
 
   const server = createServer(async (req, res) => {
-    const headers = policy();
+    const headers = policy(req);
     if (!ownHost(req, /** @type {import('node:net').AddressInfo} */ (server.address()).port)) { res.writeHead(403, headers).end('not this address'); return; }
     const url = new URL(req.url ?? '/', 'http://pages');
     if (req.method !== 'GET' && req.method !== 'HEAD') { res.writeHead(405, headers).end(); return; }
@@ -192,14 +195,14 @@ export function filmServer({ editorOrigin, rootOf }) {
       const length = (await probe(entry.root, plain.replace(/^\/+/, '')).catch(() => null))?.duration;
       /** @type {Record<string, string>} */
       const told = Number.isFinite(length) ? { [SOUND_LENGTH]: String(length), 'access-control-expose-headers': SOUND_LENGTH } : {};
-      if (!folderFiles(dirname(file), { headers: { ...policy(), ...told } })(req, res, `/${basename(file)}`, url.searchParams)) res.writeHead(403, headers).end();
+      if (!folderFiles(dirname(file), { headers: { ...headers, ...told } })(req, res, `/${basename(file)}`, url.searchParams)) res.writeHead(403, headers).end();
       return;
     }
     /* a stretch of the film rendered for the preview to play in its place (preview-cache.mjs): its cache, not the
        project's files */
     const render = /^\/__film\/preview\/([0-9a-f]+)\.mp4$/.exec(plain);
     if (render && isPreviewKey(render[1])) {
-      if (!folderFiles(previewDir(entry.root), { headers: policy() })(req, res, `/${render[1]}.mp4`, url.searchParams)) res.writeHead(403, headers).end();
+      if (!folderFiles(previewDir(entry.root), { headers })(req, res, `/${render[1]}.mp4`, url.searchParams)) res.writeHead(403, headers).end();
       return;
     }
     if (UNPLAYABLE.test(plain)) {
@@ -224,9 +227,9 @@ const START_MS = 20_000;
  *
  * `secret`: what tokens are signed with (Studio's key). `projects`: the projects there are, for a token not seen since
  * this launch (a page open from before Studio restarted).
- * @param {{ port: number, editorOrigin: () => string, secret: string, projects: () => Promise<{ id: string, path: string }[]> }} options
+ * @param {{ port: number, editorOrigin: () => string, publicEditorOrigin?: string, secret: string, projects: () => Promise<{ id: string, path: string }[]> }} options
  */
-export async function startPages({ port, editorOrigin, secret, projects }) {
+export async function startPages({ port, editorOrigin, publicEditorOrigin = '', secret, projects }) {
   /** each token's folder, as given out @type {Map<string, string>} */
   const byToken = new Map();
   const tokenOf = (/** @type {string} */ id) => createHmac('sha256', secret).update(`film origin\0${id}`).digest().subarray(0, 18).toString('base64url');
@@ -262,7 +265,7 @@ export async function startPages({ port, editorOrigin, secret, projects }) {
 
   /** The thread, listening on `at` (0: any port); resolves to its port. */
   const start = (/** @type {number} */ at) => new Promise((resolveStart, failStart) => {
-    const w = new Worker(new URL('./pages-worker.mjs', import.meta.url), { workerData: { port: at, editorOrigin: editorOrigin(), roots: [...byToken] } });
+    const w = new Worker(new URL('./pages-worker.mjs', import.meta.url), { workerData: { port: at, editorOrigin: editorOrigin(), publicEditorOrigin, roots: [...byToken] } });
     let up = false;
     const timer = setTimeout(() => { if (!up) { void w.terminate(); failStart(new Error('the film origin did not start')); } }, START_MS);
     w.on('message', (/** @type {any} */ m) => {
@@ -296,8 +299,8 @@ export async function startPages({ port, editorOrigin, secret, projects }) {
 
   return {
     origin,
-    /** The address of a project's folder on the film's origin; a renamed folder keeps it (pass the project as it is now). */
-    folderUrl: (/** @type {{ id: string, path: string }} */ project) => `${origin}/p/${serve(project)}/${within(project.path)}`,
+    /** The address of a project's folder on the film's origin; a renamed folder keeps it (pass the project as it is now). @param {{ id: string, path: string }} project @param {{ origin?: string }} [options] */
+    folderUrl: (project, options) => `${options?.origin || origin}/p/${serve(project)}/${within(project.path)}`,
     close: async () => {
       closing = true;
       const w = worker;

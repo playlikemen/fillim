@@ -1,4 +1,4 @@
-import { Ban, Check, CircleAlert, FolderOpen, Loader2, Play, X } from 'lucide-react';
+import { Ban, Check, CircleAlert, Download, FolderOpen, Loader2, Play, X } from 'lucide-react';
 import React from 'react';
 
 import { Popover } from '../Popover';
@@ -199,6 +199,17 @@ export const ExportTray = React.forwardRef<ExportTrayHandle, { projectId: string
                   </button>
                 ) : job.status === 'done' && job.outputs[0] ? (
                   <span className="flex shrink-0 items-center gap-0.5">
+                    {!studioHost && (
+                      <a
+                        href={`/api/projects/${encodeURIComponent(projectId)}/exports/${encodeURIComponent(job.id)}/download`}
+                        download
+                        title="Download export"
+                        aria-label="Download export"
+                        className="rounded-md p-1 text-[var(--text-muted)] transition hover:bg-[var(--bg-hover)] hover:text-[var(--text)]"
+                      >
+                        <Download size={13} />
+                      </a>
+                    )}
                     <button
                       type="button"
                       onClick={() => fileAction(openExport(projectId, job.id))}

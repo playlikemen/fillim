@@ -53,13 +53,24 @@ const tagOf = (/** @type {import('node:fs').Stats} */ stat) => `"${stat.size.toS
  * `port`: the one to listen on (0: any free one). `secret`: what tokens are signed with (Studio's key). `mayWrite`:
  * whether the person lets this plugin change this project, asked at every write.
  * `editorOrigin`: the editor's origin, whose page loads plugins' elements.
- * @param {{ port: number, secret: string, mayWrite: (plugin: { uid: string, source: string }, project: { id: string }) => boolean, editorOrigin?: () => string }} options
+ * @param {{ port: number, secret: string, mayWrite: (plugin: { uid: string, source: string }, project: { id: string }) => boolean, editorOrigin?: () => string, publicEditorOrigin?: string, publicOrigin?: string }} options
  */
-export async function startPluginPages({ port, secret, mayWrite, editorOrigin = () => '' }) {
+export async function startPluginPages({ port, secret, mayWrite, editorOrigin = () => '', publicEditorOrigin = '', publicOrigin = '' }) {
   const plain0 = { 'x-content-type-options': 'nosniff', 'cache-control': 'no-store' };
+  const extraEditors = publicEditorOrigin.split(',').map((s) => s.trim()).filter(Boolean);
+  const extraOrigins = publicOrigin.split(',').map((s) => s.trim()).filter(Boolean);
+  const matchedEditor = (/** @type {import('node:http').IncomingMessage} */ req) => {
+    const got = req.headers.origin;
+    if (!got) return '';
+    const allowed = [editorOrigin(), ...extraEditors].filter(Boolean);
+    return allowed.includes(got) ? got : '';
+  };
   /** What every answer says; the editor's page is let read it (its tag too). */
-  const headersFor = (/** @type {import('node:http').IncomingMessage} */ req) => (editorOrigin() && req.headers.origin === editorOrigin()
-    ? { ...plain0, 'access-control-allow-origin': editorOrigin(), 'access-control-expose-headers': 'etag', vary: 'origin' } : plain0);
+  const headersFor = (/** @type {import('node:http').IncomingMessage} */ req) => {
+    const allowed = matchedEditor(req);
+    return allowed
+      ? { ...plain0, 'access-control-allow-origin': allowed, 'access-control-expose-headers': 'etag', vary: 'origin' } : plain0;
+  };
   const sign = (/** @type {string} */ what) => createHmac('sha256', secret).update(`plugin origin\0${what}`).digest().subarray(0, 18).toString('base64url');
   /** @type {Map<string, { folder: string, hosts: string[] }>} a plugin's token → its folder and the hosts it may reach */
   const folders = new Map();
@@ -130,13 +141,14 @@ export async function startPluginPages({ port, secret, mayWrite, editorOrigin = 
       if (!folderFiles(root, { inject: '', headers: { ...headers, ...(tag ? { etag: tag } : {}) } })(req, res, path, url.searchParams)) res.writeHead(403, headers).end();
       return;
     }
-    const fromEditor = Boolean(editorOrigin()) && req.headers.origin === editorOrigin();
+    const fromEditor = Boolean(matchedEditor(req));
     /* the editor's page asks before it writes (a browser's preflight) */
     if (req.method === 'OPTIONS' && fromEditor) { res.writeHead(204, { ...headers, 'access-control-allow-methods': 'GET, HEAD, PUT', 'access-control-allow-headers': 'if-match, if-none-match, content-type', 'access-control-max-age': '600' }).end(); return; }
     if (req.method !== 'PUT') { res.writeHead(405, { ...headers, allow: 'GET, HEAD, PUT' }).end(); return; }
     /* only a page of this origin writes, or the editor's (a plugin's element there): a browser says where a request
        comes from, and another site cannot say this */
-    if (!fromEditor && (req.headers.origin !== origin || (req.headers['sec-fetch-site'] && req.headers['sec-fetch-site'] !== 'same-origin'))) { res.writeHead(403, headers).end('Only a plugin\'s own page writes here.'); return; }
+    const fromSelf = Boolean(req.headers.origin && (req.headers.origin === origin || extraOrigins.includes(req.headers.origin)));
+    if (!fromEditor && (!fromSelf || (req.headers['sec-fetch-site'] && req.headers['sec-fetch-site'] !== 'same-origin'))) { res.writeHead(403, headers).end('Only a plugin\'s own page writes here.'); return; }
     if (!mayWrite(grant.plugin, grant.project)) { res.writeHead(403, headers).end('This plugin is not allowed to change the project. The person allows it on the plugin\'s page in the library.'); return; }
     const file = writable(root, plain.replace(/^\/+/, ''));
     if (!file) { res.writeHead(403, headers).end('That file cannot be written.'); return; }
@@ -169,17 +181,18 @@ export async function startPluginPages({ port, secret, mayWrite, editorOrigin = 
     /**
      * Where a plugin's page is, and (shown for a project) where that project's files are for it.
      * `network`: the hosts its openfilm.json declares (none: it reaches none).
-     * @param {{ uid: string, source: string, folder: string, page: string, network?: { domains: string[] } }} plugin @param {{ id: string, path: string } | null} [project]
+     * @param {{ uid: string, source: string, folder: string, page: string, network?: { domains: string[] } }} plugin @param {{ id: string, path: string } | null} [project] @param {{ origin?: string }} [options]
      */
-    surface(plugin, project) {
+    surface(plugin, project, options) {
+      const baseOrigin = options?.origin || origin;
       const hosts = plugin.network?.domains ?? [];
       const token = sign(`folder\0${plugin.folder}\0${hosts.join(' ')}`);
       folders.set(token, { folder: plugin.folder, hosts });
-      const page = `${origin}/s/${token}/${plugin.page}`;
+      const page = `${baseOrigin}/s/${token}/${plugin.page}`;
       if (!project) return { page };
       const grant = sign(`grant\0${plugin.folder}\0${project.id}`);
       grants.set(grant, { plugin: { uid: plugin.uid, source: plugin.source }, project: { id: project.id, path: project.path }, hosts });
-      return { page, project: `${origin}/f/${grant}/` };
+      return { page, project: `${baseOrigin}/f/${grant}/` };
     },
     close: () => new Promise((done) => { server.closeAllConnections(); server.close(() => done(undefined)); }),
   };

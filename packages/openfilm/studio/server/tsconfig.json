@@ -10,6 +10,6 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["*.mjs", "providers/*.mjs", "../client.mjs"],
+  "include": ["*.mjs", "providers/*.mjs", "saas/*.mjs", "../client.mjs"],
   "exclude": ["*.test.mjs", "providers/*.test.mjs"]
 }

@@ -78,6 +78,8 @@ import { FILM_FILE, clipKind, isPage } from '../../src/film-doc.mjs';
 import { listenLocal } from '../../src/host.mjs';
 import { captionTrackRoutes } from './caption-tracks.mjs';
 import { binDelete, binList, binRestore, recycle } from './recycle-bin.mjs';
+import { closeDb, deleteOwnedProject, ensureSchema, ensureUser, getProjectOwner, getUserProfile, listOwnedProjects, recordUsage, renameOwnedProject, touchOwnedProject, upsertOwnedProject } from './saas/db.mjs';
+import { fetchUpstreamSession, proxyNeonAuth, resolveSaasUser, saasEnabled, saasSetCookieHeader, safeUserDir, signSaasCookieValue, verifyNeonJwt } from './saas/auth.mjs';
 import { allowProjectSkill, appIconIn, revocationOf, revokedNow, skillFiles, commandsIn, coreSkills, elementIn, keeps, listSkills, offeredSkills, ownSkills, pluginRuns, projectSkillAllowed, pluginWrites, removeSkill, setPluginRuns, setPluginWrites, setSkillCover, setSkillOn, skillOrigins, skillsOff, thisPlatform } from '../../src/skills.mjs';
 import { startPluginPages } from './plugin-pages.mjs';
 import { startPluginPrograms } from './plugin-programs.mjs';
@@ -172,6 +174,7 @@ export async function startStudio({ port = 4747, key, openBrowser = systemBrowse
   /** The key a browser session holds, Studio's or the agents', from either session cookie (null: none). */
   const cookieKey = (/** @type {Req} */ req) => [cookie(req, COOKIE), cookie(req, FRAMED)].find((k) => sameKey(k) || matches(k, agentKey)) ?? null;
   key ??= advertise ? studioKey() : randomBytes(24).toString('hex');
+  const saasSecret = key;
   if (sealer) {
     sealKeysWith(sealer);
     await sealPlainKeys().catch((e) => console.warn(`service keys: not sealed yet (${e instanceof Error ? e.message : String(e)})`));
@@ -223,6 +226,14 @@ export async function startStudio({ port = 4747, key, openBrowser = systemBrowse
   const toPages = (event) => { for (const send of editorPages.keys()) send(event); };
   let origin = '';
   let filmOrigin = '';
+  const publicEditorOrigin = process.env.OPENFILM_PUBLIC_ORIGIN?.trim() ?? '';
+  const publicFilmOrigin = process.env.OPENFILM_PUBLIC_FILM_ORIGIN?.trim() ?? '';
+  const publicPluginOrigin = process.env.OPENFILM_PUBLIC_PLUGIN_ORIGIN?.trim() ?? '';
+  const extraOrigins = new Set(publicEditorOrigin.split(',').map((s) => s.trim()).filter(Boolean));
+  const isAllowedOrigin = (/** @type {string | undefined} */ value) => Boolean(value && (value === origin || extraOrigins.has(value)));
+  const isPublicReq = (/** @type {Req} */ req) => Boolean((extraOrigins.size || publicFilmOrigin || publicPluginOrigin) && (req.headers['cf-ray'] || req.headers['cf-connecting-ip'] || String(req.headers['x-forwarded-proto'] ?? '').toLowerCase() === 'https' || extraOrigins.has(String(req.headers.origin ?? ''))));
+  const reqFilmOrigin = (/** @type {Req} */ req) => (isPublicReq(req) && publicFilmOrigin ? publicFilmOrigin : undefined);
+  const reqPluginOrigin = (/** @type {Req} */ req) => (isPublicReq(req) && publicPluginOrigin ? publicPluginOrigin : undefined);
 
   /** where each project's exports report their progress: the pages watching it */
   const exportRoots = new Map();
@@ -240,19 +251,24 @@ export async function startStudio({ port = 4747, key, openBrowser = systemBrowse
   const agentKey = agentKeyOf(key);
 
   /**
-   * The caller holds the key; a browser write must also come from the editor's own origin. Says who it is: the
-   * person (the pages, their CLI), or an agent the app runs (`x-studio-key` its key, or a browser it opened Studio
-   * in with its key).
-   * @returns {'person' | 'agent'}
+   * The caller holds the key or an authenticated SaaS session; a browser write must also come from an allowed origin.
+   * @returns {Promise<'person' | 'agent' | { kind: 'saas', user: { id: string, email: string, name: string } }>}
    */
-  function authorize(/** @type {Req} */ req) {
+  async function authorize(/** @type {Req} */ req) {
     const given = /** @type {string | undefined} */ (req.headers['x-studio-key']);
     if (sameKey(given)) return 'person';
     if (matches(given, agentKey)) return 'agent';
     const session = cookieKey(req);
-    if (!session) throw new HttpError(401, 'open Studio from the address `openfilm open` prints');
-    if (req.method !== 'GET' && req.method !== 'HEAD' && req.headers.origin !== origin) throw new HttpError(403, 'not from Studio');
-    return sameKey(session) ? 'person' : 'agent';
+    if (session) {
+      if (req.method !== 'GET' && req.method !== 'HEAD' && !isAllowedOrigin(req.headers.origin)) throw new HttpError(403, 'not from Studio');
+      return sameKey(session) ? 'person' : 'agent';
+    }
+    const saas = await resolveSaasUser(req, saasSecret);
+    if (saas) {
+      if (req.method !== 'GET' && req.method !== 'HEAD' && !isAllowedOrigin(req.headers.origin)) throw new HttpError(403, 'not from Studio');
+      return { kind: 'saas', user: saas };
+    }
+    throw new HttpError(401, 'open Studio from the address `openfilm open` prints');
   }
 
   /*
@@ -319,7 +335,50 @@ export async function startStudio({ port = 4747, key, openBrowser = systemBrowse
     /* which Studio this is: the CLI replaces an older one, and finds its own home's when run.json is gone. Asked
        without the key, so it says nothing of the machine: its home only as a digest (homeTag), no process id */
     /* `app`: the desktop app's Studio, which updates with the app (`openfilm update` says so instead) */
-    if (path === '/api/health') return json(res, 200, { product: 'openfilm-studio', version: VERSION, home: homeTag(), filmOrigin, ...(stays ? { app: true } : {}) });
+    if (path === '/api/health') return json(res, 200, { product: 'openfilm-studio', version: VERSION, home: homeTag(), filmOrigin: reqFilmOrigin(req) ?? filmOrigin, ...(saasEnabled() ? { saas: true } : {}), ...(stays ? { app: true } : {}) });
+    if (path === '/api/saas/config' && req.method === 'GET') {
+      return json(res, 200, {
+        enabled: saasEnabled(),
+        authProxyPath: '/api/auth',
+        repoUrl: 'https://github.com/playlikemen/fillim',
+      });
+    }
+    if (path.startsWith('/api/auth/')) {
+      return proxyNeonAuth(req, res, path.slice('/api/auth/'.length), url, {
+        secret: saasSecret,
+        secure: isPublicReq(req),
+        isAllowedOrigin,
+      });
+    }
+    if (path === '/api/saas/me' && req.method === 'GET') {
+      if (!saasEnabled()) return json(res, 200, { enabled: false, user: null });
+      const user = await resolveSaasUser(req, saasSecret);
+      if (!user) return json(res, 200, { enabled: true, user: null });
+      await ensureUser(user);
+      return json(res, 200, { enabled: true, user: await getUserProfile(user.id) });
+    }
+    if (path === '/api/saas/session' && req.method === 'POST') {
+      if (!saasEnabled()) throw new HttpError(404, 'SaaS mode is not enabled');
+      if (req.headers.origin && !isAllowedOrigin(req.headers.origin)) throw new HttpError(403, 'not from Studio');
+      const authHeader = String(req.headers.authorization ?? '');
+      const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+      const body = /** @type {{ token?: string } | null} */ (await readJson(req).catch(() => null));
+      const token = bearer || (typeof body?.token === 'string' ? body.token.trim() : '');
+      const authUser = (token ? await verifyNeonJwt(token) : null)
+        ?? await fetchUpstreamSession(String(req.headers.cookie ?? ''));
+      if (!authUser) throw new HttpError(401, 'Sign in required');
+      await ensureUser(authUser);
+      const profile = await getUserProfile(authUser.id);
+      const cookieHeader = saasSetCookieHeader(signSaasCookieValue(authUser, saasSecret), { secure: isPublicReq(req) });
+      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'set-cookie': cookieHeader });
+      return res.end(JSON.stringify({ user: profile }));
+    }
+    if (path === '/api/saas/logout' && req.method === 'POST') {
+      if (req.headers.origin && !isAllowedOrigin(req.headers.origin)) throw new HttpError(403, 'not from Studio');
+      const clearHeader = saasSetCookieHeader('', { secure: isPublicReq(req), clear: true });
+      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'set-cookie': clearHeader });
+      return res.end(JSON.stringify({ ok: true }));
+    }
     /* a browser signs in with the key it was given: Studio's (the person's), or the agents' (a browser an agent opened
        Studio in, which has all but the person's say) */
     const signIn = (/** @type {string} */ k) => [`${COOKIE}=${k}; Path=/; HttpOnly; SameSite=Strict`, `${FRAMED}=${k}; Path=/; HttpOnly; Secure; SameSite=None; Partitioned`];
@@ -360,11 +419,20 @@ export async function startStudio({ port = 4747, key, openBrowser = systemBrowse
       return sendEditor(res, editorDir, path);
     }
 
-    const caller = authorize(req);
+    const caller = await authorize(req);
     const parts = path.slice('/api/'.length).split('/').map(decodeURIComponent);
     /* the person's own say is theirs: an agent uses the services they connected, and does not change them */
     if (caller === 'agent' && personsSay(parts, req.method ?? 'GET')) {
       throw new HttpError(403, "only the person changes this, in Studio's Settings: tell them what to change and why");
+    }
+    if (typeof caller === 'object' && caller.kind === 'saas') {
+      const head0 = parts[0];
+      const hostOnly = head0 === 'quit' || head0 === 'open' || head0 === 'browse' || head0 === 'pick-folder'
+        || head0 === 'locations' || head0 === 'desktop' || head0 === 'update' || head0 === 'kept'
+        || (head0 === 'diagnostics' && parts[1] === 'export')
+        || (head0 === 'recycle' && req.method !== 'GET')
+        || ((head0 === 'providers' || head0 === 'local-models') && req.method !== 'GET');
+      if (hostOnly) throw new HttpError(403, 'Host workstation action is disabled in cloud workspaces.');
     }
     const [head, group, action] = parts;
     const usesSaved = head === 'saved' || (head === 'locations' && group === 'saved' && req.method === 'POST')
@@ -378,8 +446,14 @@ export async function startStudio({ port = 4747, key, openBrowser = systemBrowse
     try { return await run; } finally { savedRequests.delete(run); }
   }
 
-  /** @param {Req} req @param {Res} res @param {URL} url @param {string[]} parts @param {'person' | 'agent'} caller */
+  /** @param {Req} req @param {Res} res @param {URL} url @param {string[]} parts @param {'person' | 'agent' | { kind: 'saas', user: { id: string, email: string, name: string } }} caller */
   async function apiRoute(req, res, url, parts, caller) {
+    const saasUser = typeof caller === 'object' && caller.kind === 'saas' ? caller.user : null;
+    const assertSaasOwner = async (/** @type {string} */ projectId) => {
+      if (!saasUser) return;
+      const owned = await getProjectOwner(projectId);
+      if (!owned || owned.owner_id !== saasUser.id) throw new HttpError(404, 'no such project');
+    };
     /* stop: another app is taking over this machine's Studio, or `openfilm open` starts it afresh (`whenIdle`: not
        while an export runs or media is made — it would be lost). `pages`: how many were open, to come back */
     if (parts[0] === 'quit' && parts.length === 1 && req.method === 'POST') {
@@ -582,8 +656,8 @@ export async function startStudio({ port = 4747, key, openBrowser = systemBrowse
         /* `folder`: the library as the film's origin serves it, so a saved page plays in the media pane's viewer as a
            project's does */
         /* `view=starred`: the person's own files starred, flat, wherever they are */
-        if (req.method === 'GET' && url.searchParams.get('view') === 'starred') return json(res, 200, { ...await starredListing(libraryFavorites()), folder: pages.folderUrl({ id: SAVED_ORIGIN_ID, path: lib }) });
-        if (req.method === 'GET') return json(res, 200, { ...await catalogListing(url.searchParams.get('at') ?? '', url.searchParams.get('view') ?? '', url.searchParams.get('q') ?? ''), folder: pages.folderUrl({ id: SAVED_ORIGIN_ID, path: lib }) });
+        if (req.method === 'GET' && url.searchParams.get('view') === 'starred') return json(res, 200, { ...await starredListing(libraryFavorites()), folder: pages.folderUrl({ id: SAVED_ORIGIN_ID, path: lib }, { origin: reqFilmOrigin(req) }) });
+        if (req.method === 'GET') return json(res, 200, { ...await catalogListing(url.searchParams.get('at') ?? '', url.searchParams.get('view') ?? '', url.searchParams.get('q') ?? ''), folder: pages.folderUrl({ id: SAVED_ORIGIN_ID, path: lib }, { origin: reqFilmOrigin(req) }) });
         if (req.method === 'PUT') return json(res, 200, { path: libraryPath((await importFile(lib, rel(at), req)).path) });
         if (req.method === 'PATCH') {
           const { from, to } = /** @type {{ from?: unknown, to?: unknown }} */ (await readJson(req) ?? {});
@@ -712,7 +786,7 @@ export async function startStudio({ port = 4747, key, openBrowser = systemBrowse
     }
     /* OpenFilm's plugins (src/plugins.mjs): each with whether it is on; one turned on or off (PUT plugins/:id { on }),
        answered with them all. 409 for one not made yet */
-    if (parts[0] === 'plugins' && parts.length === 1 && req.method === 'GET') return json(res, 200, { plugins: pluginsShown(), order: workbenchOrder() });
+    if (parts[0] === 'plugins' && parts.length === 1 && req.method === 'GET') return json(res, 200, { plugins: pluginsShown(req), order: workbenchOrder() });
     /* one of OpenFilm's own plugins' app icon (icon.svg, .png or .webp in its folder: src/skills.mjs appIconIn) */
     if (parts[0] === 'plugin-icon' && parts.length === 2 && req.method === 'GET') {
       const id = decodeURIComponent(parts[1]);
@@ -739,7 +813,7 @@ export async function startStudio({ port = 4747, key, openBrowser = systemBrowse
       /* on: true or false; null: removed (one that comes with OpenFilm is only turned off) */
       if (typeof on !== 'boolean' && on !== null) throw new HttpError(400, 'on: true, false or null');
       try { if (on === null) removePlugin(parts[1]); else setPluginOn(parts[1], on); } catch (e) { throw new HttpError(/there is no plugin/i.test(/** @type {Error} */ (e).message) ? 404 : 409, /** @type {Error} */ (e).message); }
-      return json(res, 200, { plugins: pluginsShown(), order: workbenchOrder() });
+      return json(res, 200, { plugins: pluginsShown(req), order: workbenchOrder() });
     }
     /* the person's media in numbers (media-index.mjs): places, files, the room they take and the room copies take */
     if (parts[0] === 'media-index' && parts.length === 1 && req.method === 'GET') return json(res, 200, { ...await mediaSummary(), scanning: mediaIndex.busy() });
@@ -864,13 +938,13 @@ export async function startStudio({ port = 4747, key, openBrowser = systemBrowse
           ...(k.element && !k.program && k.installed && !k.core ? (() => {
             const runs = pluginRuns(k, project ?? null);
             if (!runs) return { inApp: true };
-            const at = pluginPages.surface({ uid: k.uid, source: k.source, folder: k.folder, page: k.element, ...(k.network ? { network: k.network } : {}) }, project ?? null);
+            const at = pluginPages.surface({ uid: k.uid, source: k.source, folder: k.folder, page: k.element, ...(k.network ? { network: k.network } : {}) }, project ?? null, { origin: reqPluginOrigin(req) });
             let version = '';
             try { const stat = statSync(join(k.folder, k.element)); version = `${stat.size.toString(36)}-${Math.round(stat.mtimeMs).toString(36)}`; } catch { /* gone since it was listed */ }
             return { inApp: true, runs: true, element: `${at.page}?v=${version}`, ...(at.project ? { files: at.project } : {}) };
           })() : {}),
           ...(k.page && !k.program && !k.element && k.installed && !k.core ? (() => {
-            const at = pluginPages.surface({ uid: k.uid, source: k.source, folder: k.folder, page: k.page, ...(k.network ? { network: k.network } : {}) }, project ?? null);
+            const at = pluginPages.surface({ uid: k.uid, source: k.source, folder: k.folder, page: k.page, ...(k.network ? { network: k.network } : {}) }, project ?? null, { origin: reqPluginOrigin(req) });
             return { surface: at.page, ...(at.project ? { files: at.project } : {}), ...(pluginWrites(k, project ?? null) ? { writes: true } : {}) };
           })() : {}),
           /* a project's own, not allowed in it yet; one OpenFilm withdrew, and why (`withheld` above) */
@@ -1070,12 +1144,29 @@ export async function startStudio({ port = 4747, key, openBrowser = systemBrowse
 
     if (parts[0] !== 'projects') throw new HttpError(404, 'no such API');
     if (parts.length === 1) {
-      if (req.method === 'GET') return json(res, 200, { projects: (await listProjects()).map((p) => (agentIn(p.path) ? { ...p, working: true } : p)) });
+      if (req.method === 'GET') {
+        const all = await listProjects();
+        const visible = saasUser
+          ? (() => listOwnedProjects(saasUser.id).then((rows) => {
+              const owned = new Set(rows.map((r) => r.id));
+              return all.filter((p) => owned.has(p.id));
+            }))()
+          : Promise.resolve(all);
+        return json(res, 200, { projects: (await visible).map((p) => (agentIn(p.path) ? { ...p, working: true } : p)) });
+      }
       /* `create` false: only a folder holding a film opens (the editor asks before starting one in a folder) */
       if (req.method === 'POST') {
         const body = /** @type {{ path?: string, name?: string, create?: boolean, subtitleStyle?: unknown }} */ (await readJson(req));
-        if (body.path) return json(res, 200, { project: await openProject(body.path, { create: body.create !== false }) });
-        const project = await createProject(body.name);
+        if (body.path) {
+          if (saasUser) throw new HttpError(403, 'Opening host paths is not allowed in cloud workspaces.');
+          return json(res, 200, { project: await openProject(body.path, { create: body.create !== false }) });
+        }
+        const baseDir = saasUser ? join(libraryRoot(), 'users', safeUserDir(saasUser.id)) : libraryRoot();
+        const project = await createProject(body.name, baseDir);
+        if (saasUser) {
+          await upsertOwnedProject(saasUser.id, project);
+          await recordUsage(saasUser.id, 'project.created', project.id, 0, { name: project.name });
+        }
         /* a new film starts in the subtitle look this person used last (Studio remembers it): written before its first
            version, so the project, its exports and Studio agree. An opened project keeps its own, or the default (#286). */
         if (body.subtitleStyle && typeof body.subtitleStyle === 'object') {
@@ -1087,6 +1178,7 @@ export async function startStudio({ port = 4747, key, openBrowser = systemBrowse
     /* a film from GitHub (fetch-repo.mjs): POST { url } `projects/fetch` starts it → { job }; GET `projects/fetch/:id`
        says how it goes (`project` once it is opened); DELETE stops it */
     if (parts[1] === 'fetch') {
+      if (saasUser) throw new HttpError(403, 'Importing external GitHub repositories is disabled in cloud workspaces.');
       if (parts.length === 2 && req.method === 'POST') return json(res, 200, { job: fetches.start(/** @type {{ url?: string }} */ (await readJson(req)).url) });
       if (parts.length === 3 && req.method === 'GET') return json(res, 200, { job: fetches.get(parts[2]) });
       if (parts.length === 3 && req.method === 'DELETE') { fetches.cancel(parts[2]); return json(res, 200, {}); }
@@ -1095,7 +1187,8 @@ export async function startStudio({ port = 4747, key, openBrowser = systemBrowse
        DELETE `projects/folders/:id` (with the folders inside it; answers the ids of the projects that were in them), PUT { folderId }
        `projects/:id/folder` (null: no folder) */
     if (parts[1] === 'folders' && parts.length <= 3) {
-      if (parts.length === 2 && req.method === 'GET') return json(res, 200, { folders: await listFolders() });
+      if (req.method === 'GET') return json(res, 200, { folders: saasUser ? [] : await listFolders() });
+      if (saasUser) throw new HttpError(403, 'Folder organization is managed in your cloud workspace.');
       if (parts.length === 2 && req.method === 'POST') {
         const { name, parentId } = /** @type {{ name?: string, parentId?: string | null }} */ (await readJson(req));
         return json(res, 200, { folder: await createFolder(name, parentId) });
@@ -1109,19 +1202,29 @@ export async function startStudio({ port = 4747, key, openBrowser = systemBrowse
       if (parts.length === 3 && req.method === 'DELETE') return json(res, 200, { projects: await deleteFolder(parts[2]) });
     }
     if (parts.length === 3 && parts[2] === 'folder' && req.method === 'PUT') {
+      if (saasUser) throw new HttpError(403, 'Folder organization is managed in your cloud workspace.');
       const { folderId = null } = /** @type {{ folderId?: string | null }} */ (await readJson(req));
       return json(res, 200, { project: await moveProjectToFolder(parts[1], folderId || null) });
     }
     /* a project whose folder was moved: the folder it is in now (projects.mjs locateProject) */
     if (parts.length === 3 && parts[2] === 'locate' && req.method === 'POST') {
+      if (saasUser) throw new HttpError(403, 'Locating host folders is disabled in cloud workspaces.');
       const { path: folder } = /** @type {{ path?: string }} */ (await readJson(req));
       if (typeof folder !== 'string' || !isAbsolute(folder)) throw new HttpError(400, 'the folder\'s full path, please');
       return json(res, 200, { project: await locateProject(parts[1], folder) });
     }
     if (parts.length === 3 && parts[2] === 'duplicate' && req.method === 'POST') {
+      await assertSaasOwner(parts[1]);
       const { name } = /** @type {{ name?: string }} */ (await readJson(req));
-      return json(res, 200, { project: await duplicateProject(parts[1], name) });
+      const baseDir = saasUser ? join(libraryRoot(), 'users', safeUserDir(saasUser.id)) : libraryRoot();
+      const copy = await duplicateProject(parts[1], name, baseDir);
+      if (saasUser) {
+        await upsertOwnedProject(saasUser.id, copy);
+        await recordUsage(saasUser.id, 'project.duplicated', copy.id, 0, { from: parts[1], name: copy.name });
+      }
+      return json(res, 200, { project: copy });
     }
+    await assertSaasOwner(parts[1]);
     const project = await projectById(parts[1]);
     const rest = parts.slice(2).join('/');
     /** A reference changes .film metadata, which the project file watcher skips. @template T @param {() => Promise<T>} work */
@@ -1180,7 +1283,7 @@ export async function startStudio({ port = 4747, key, openBrowser = systemBrowse
         /* `filmMissing`: read as an empty film, and said to be missing (see watch.mjs `film-missing`) */
         /* `outer`: a compound clip's film is in this project, which its editor goes back to (parts.mjs) */
         const outer = await outerProject(project.path);
-        return json(res, 200, { project, folder: pages.folderUrl(project), ...film, ...(projectMissing(project.path) === 'film' ? { filmMissing: true } : {}), ...(outer ? { outer } : {}) });
+        return json(res, 200, { project, folder: pages.folderUrl(project, { origin: reqFilmOrigin(req) }), ...film, ...(projectMissing(project.path) === 'film' ? { filmMissing: true } : {}), ...(outer ? { outer } : {}) });
       }
       if (req.method === 'PATCH') {
         const { name } = /** @type {{ name?: string }} */ (await readJson(req));
@@ -1191,6 +1294,7 @@ export async function startStudio({ port = 4747, key, openBrowser = systemBrowse
         /* the app's agent between turns works in the folder, and Windows will not rename it under that: let go first */
         const renamed = await renameProject(project.id, String(name ?? ''), { release });
         if (renamed.path !== project.path || renamed.name !== project.name) {
+          if (saasUser) await renameOwnedProject(saasUser.id, renamed.id, renamed.name, renamed.path);
           watchers.move(project.path, renamed.path);
           exportRoots.set(project.id, renamed.path);
           /* its address stays: the preview open on it keeps loading from the folder by its new name */
@@ -1210,6 +1314,10 @@ export async function startStudio({ port = 4747, key, openBrowser = systemBrowse
         /* its files are being written, and its chat is mid-turn: stopped first, by the person */
         if (agentIn(project.path)) throw new HttpError(409, 'An agent is running in this project: stop it first, then delete the project.', { code: 'agent-running' });
         await deleteProject(project.id);
+        if (saasUser) {
+          await deleteOwnedProject(saasUser.id, project.id);
+          await recordUsage(saasUser.id, 'project.deleted', project.id, 0, { name: project.name });
+        }
         /* every page showing it leaves it (with tabs, its tab closes) */
         watchers.emit(project.path, { type: 'gone' });
         return json(res, 200, {});
@@ -1218,6 +1326,7 @@ export async function startStudio({ port = 4747, key, openBrowser = systemBrowse
     /* an editor page shows it: the person opened it, so it is the one `openfilm open` alone comes back to */
     if (rest === 'opened' && req.method === 'POST') {
       mediaIndex.soon(project.path);
+      if (saasUser) await touchOwnedProject(saasUser.id, project.id);
       return json(res, 200, { project: await markOpened(project.id) });
     }
     /* the fonts its pages declare with @font-face, and with `page` (a project path) the families that page can draw with
@@ -1265,7 +1374,7 @@ export async function startStudio({ port = 4747, key, openBrowser = systemBrowse
         const snapshot = await historyPreviews.get(project.path, history[1]);
         const film = await readProjectFilm(snapshot.path);
         return json(res, 200, {
-          folder: pages.folderUrl({ id: `${project.id}/history/${history[1]}`, path: snapshot.path }),
+          folder: pages.folderUrl({ id: `${project.id}/history/${history[1]}`, path: snapshot.path }, { origin: reqFilmOrigin(req) }),
           doc: film.doc, missing: snapshot.missing,
         });
       }
@@ -1592,12 +1701,13 @@ export async function startStudio({ port = 4747, key, openBrowser = systemBrowse
       if (!Array.isArray(sounds) || sounds.length > 5000 || typeof duration !== 'number' || !(duration > 0 && duration <= 24 * 3600)) throw new HttpError(400, 'sounds: a list of the film\'s sounds; duration: seconds');
       /* the preview names each sound on the address the film is served at: taken back to its path in the project,
          and only a file the project serves (any other is no sound of this film) */
-      const base = new URL(pages.folderUrl(project));
+      const localBase = new URL(pages.folderUrl(project));
+      const reqBase = new URL(pages.folderUrl(project, { origin: reqFilmOrigin(req) }));
       const local = /** @type {import('../../src/host.mjs').FilmSound[]} */ (sounds).flatMap((sound) => {
         if (!sound || typeof sound.src !== 'string') return [];
-        const source = new URL(sound.src, base);
-        if (source.origin !== base.origin || !source.pathname.startsWith(base.pathname)) return [];
-        const path = decodeURIComponent(source.pathname.slice(base.pathname.length));
+        const source = new URL(sound.src, reqBase);
+        if ((source.origin !== reqBase.origin && source.origin !== localBase.origin) || !source.pathname.startsWith(localBase.pathname)) return [];
+        const path = decodeURIComponent(source.pathname.slice(localBase.pathname.length));
         return path && servable(project.path, path) ? [{ ...sound, src: path.split('/').map(encodeURIComponent).join('/') }] : [];
       });
       try {
@@ -1691,10 +1801,21 @@ export async function startStudio({ port = 4747, key, openBrowser = systemBrowse
         /* several at once: `{ jobs: [ask…], folder? }` → `{ exports }`; one: the ask itself → `{ export }` */
         if (body && typeof body === 'object' && 'jobs' in body) {
           const request = Array.isArray(body.jobs) ? { ...body, jobs: body.jobs.map(withSampling) } : body;
-          return json(res, 200, { exports: exports.startAll(project, request) });
+          const started = exports.startAll(project, request);
+          if (saasUser) await recordUsage(saasUser.id, 'export.started', project.id, -1, { count: started.length }).catch(() => {});
+          return json(res, 200, { exports: started });
         }
-        return json(res, 200, { export: exports.start(project, withSampling(body)) });
+        const job = exports.start(project, withSampling(body));
+        if (saasUser) await recordUsage(saasUser.id, 'export.started', project.id, -1, { kind: job.kind }).catch(() => {});
+        return json(res, 200, { export: job });
       }
+    }
+    if (parts[2] === 'exports' && parts[3] && parts[4] === 'download' && req.method === 'GET') {
+      const job = exports.list(project.id).find((j) => j.id === parts[3]);
+      const file = job?.outputs[0];
+      if (!file || !existsSync(file)) throw new HttpError(404, 'that export is not there any more');
+      res.setHeader('content-disposition', `attachment; filename="${basename(file).replace(/"/g, '')}"`);
+      return sendMedia(req, res, file);
     }
     if (parts[2] === 'exports' && parts[3] && req.method === 'DELETE') {
       if (exports.list(project.id).some((j) => j.id === parts[3])) exports.cancel(parts[3]);
@@ -1702,6 +1823,7 @@ export async function startStudio({ port = 4747, key, openBrowser = systemBrowse
     }
     /* a finished export, shown where it is on the person's computer, or opened in its app */
     if (parts[2] === 'exports' && parts[3] && (parts[4] === 'reveal' || parts[4] === 'open') && req.method === 'POST') {
+      if (saasUser) throw new HttpError(403, 'Host file actions are disabled in cloud workspaces.');
       const job = exports.list(project.id).find((j) => j.id === parts[3]);
       const file = job?.outputs[0];
       if (!file || !existsSync(file)) throw new HttpError(404, 'that export is not there any more');
@@ -1759,6 +1881,7 @@ export async function startStudio({ port = 4747, key, openBrowser = systemBrowse
     }
     /* a file or folder of the project, shown where it is on the person's computer */
     if (rest === 'reveal' && req.method === 'POST') {
+      if (saasUser) throw new HttpError(403, 'Host file actions are disabled in cloud workspaces.');
       const { path: rel, original } = /** @type {{ path?: string, original?: boolean }} */ (await readJson(req));
       /* no path: the project's own folder; `original`: where a linked file is kept */
       const abs = !rel ? project.path : original === true ? realpathSync(readable(project.path, String(rel))) : readable(project.path, String(rel));
@@ -1801,8 +1924,9 @@ export async function startStudio({ port = 4747, key, openBrowser = systemBrowse
     void (async () => {
       const path = new URL(req.url ?? '/', origin).pathname;
       const given = /** @type {string | undefined} */ (req.headers['x-studio-key']);
-      const keyed = sameKey(given) || matches(given, agentKey) || (cookieKey(req) !== null && req.headers.origin === origin);
-      if (!keyed) return refuse('401 Unauthorized');
+      const keyed = sameKey(given) || matches(given, agentKey) || (cookieKey(req) !== null && isAllowedOrigin(req.headers.origin));
+      const saas = !keyed && isAllowedOrigin(req.headers.origin) ? await resolveSaasUser(req, saasSecret) : null;
+      if (!keyed && !saas) return refuse('401 Unauthorized');
       const parts = path.split('/').slice(1).map(decodeURIComponent);
       /** @type {() => void} */
       let stop = () => {};
@@ -1816,6 +1940,10 @@ export async function startStudio({ port = 4747, key, openBrowser = systemBrowse
         return;
       }
       if (parts.length === 4 && parts[0] === 'api' && parts[1] === 'projects' && parts[3] === 'events') {
+        if (saas) {
+          const owned = await getProjectOwner(parts[2]).catch(() => null);
+          if (!owned || owned.owner_id !== saas.id) return refuse('403 Forbidden');
+        }
         const project = await projectById(parts[2]).catch(() => null);
         if (!project || (project.missing && project.missingReason !== 'film')) return refuse('404 Not Found');
         const send = acceptWebSocket(req, socket, () => stop());
@@ -1830,13 +1958,14 @@ export async function startStudio({ port = 4747, key, openBrowser = systemBrowse
   void listExamples().catch(() => {});
   /* and what each service offers (OpenFilm's models are its service's to say), so Settings → Services opens with them */
   void freshProviders().catch(() => {});
+  if (saasEnabled()) void ensureSchema().catch((e) => console.error('saas schema:', e));
   const address = /** @type {import('node:net').AddressInfo} */ (editor.address());
   origin = `http://127.0.0.1:${address.port}`;
   COOKIE = cookieName(address.port);
   FRAMED = framedCookieName(address.port);
   /* the film's port is the next one: when it is not free, the editor's is let go again, so a caller can try others */
   const historyPreviews = createHistoryPreviews();
-  const pages = await startPages({ port: port ? address.port + 1 : 0, editorOrigin: () => origin, secret: key, projects: listProjects }).catch(async (e) => {
+  const pages = await startPages({ port: port ? address.port + 1 : 0, editorOrigin: () => origin, publicEditorOrigin, secret: key, projects: listProjects }).catch(async (e) => {
     watchers.closeAll();
     await new Promise((done) => editor.close(() => done(undefined)));
     throw e;
@@ -1845,21 +1974,21 @@ export async function startStudio({ port = 4747, key, openBrowser = systemBrowse
   /* the plugins' origin, on the port after the film's when that one is free (a page's own storage is kept by its
      origin), else on any */
   /* one let run (a program, or an element in the editor's own page) can do all the person's agent can: it writes too */
-  const pluginOptions = { secret: key, editorOrigin: () => origin, mayWrite: (/** @type {{ uid: string, source: string }} */ plugin, /** @type {{ id: string }} */ project) => pluginWrites(plugin, project) || pluginRuns(plugin, project) };
+  const pluginOptions = { secret: key, editorOrigin: () => origin, publicEditorOrigin, publicOrigin: publicPluginOrigin, mayWrite: (/** @type {{ uid: string, source: string }} */ plugin, /** @type {{ id: string }} */ project) => pluginWrites(plugin, project) || pluginRuns(plugin, project) };
   const pluginPages = await startPluginPages({ port: port ? address.port + 2 : 0, ...pluginOptions }).catch(() => startPluginPages({ port: 0, ...pluginOptions }));
   /**
    * OpenFilm's plugins as the editor is told them: each with whether it is on, where the module of its element is
    * (its package.json's `browser`, src/skills.mjs elementIn), on the plugins' origin as anyone's is, and the commands it
    * brings, by name (src/skills.mjs commandsIn). Its own ship with OpenFilm, so they are not asked leave to run.
    */
-  const pluginsShown = () => pluginStates().map((p) => {
+  const pluginsShown = (/** @type {Req | undefined} */ req = undefined) => pluginStates().map((p) => {
     const folder = join(pluginsDir(), p.id);
     const module = p.soon ? null : elementIn(folder), commands = p.soon ? null : commandsIn(folder, p.id);
     const icon = appIconIn(folder);
     /* the icon's address changes with its file, so a new one is not hidden by the copy the page keeps an hour */
     let drawn = '';
     if (icon) try { const stat = statSync(join(folder, icon)); drawn = `${stat.size.toString(36)}-${Math.round(stat.mtimeMs).toString(36)}`; } catch { /* gone since it was found */ }
-    return { ...p, ...(module ? { element: pluginPages.surface({ uid: `openfilm/${p.id}`, source: 'own', folder, page: module }).page } : {}),
+    return { ...p, ...(module ? { element: pluginPages.surface({ uid: `openfilm/${p.id}`, source: 'own', folder, page: module }, null, { origin: req ? reqPluginOrigin(req) : undefined }).page } : {}),
       ...(icon ? { appIcon: `/api/plugin-icon/${p.id}?v=${encodeURIComponent(`${icon}-${drawn}`)}` } : {}),
       ...(commands ? { commands: Object.keys(commands) } : {}) };
   });
@@ -1907,6 +2036,7 @@ export async function startStudio({ port = 4747, key, openBrowser = systemBrowse
     await new Promise((done) => editor.close(() => done(undefined)));
     await exporting;
     await historyPreviews.close();
+    await closeDb();
   }
   return studio;
 }

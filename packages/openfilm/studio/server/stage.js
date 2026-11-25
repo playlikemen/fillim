@@ -23,7 +23,12 @@
  * Only the editor's origin is listened to and answered (the server puts it in for EDITOR).
  */
 (() => {
-  const EDITOR = __EDITOR__;
+  const EDITORS = __EDITOR__;
+  const editorList = Array.isArray(EDITORS) ? EDITORS : [EDITORS];
+  const refOrigin = (() => { try { return typeof document !== 'undefined' && document.referrer ? new URL(document.referrer).origin : ''; } catch { return ''; } })();
+  let EDITOR = (refOrigin && editorList.includes(refOrigin) ? refOrigin : '')
+    || (typeof location !== 'undefined' && location.protocol === 'https:' && editorList.find((o) => o.startsWith('https://')))
+    || editorList[0];
   const BLUE = '#0d99ff';
   const post = (message) => parent.postMessage({ source: 'openfilm-film', ...message }, EDITOR);
   const editor = () => window.__filmEditor;
@@ -2362,7 +2367,8 @@
   });
 
   window.addEventListener('message', async (e) => {
-    if (e.origin !== EDITOR || e.source !== parent || e.data?.source !== 'openfilm-studio' || e.data.type !== 'stage') return;
+    if (!editorList.includes(e.origin) || e.source !== parent || e.data?.source !== 'openfilm-studio' || e.data.type !== 'stage') return;
+    EDITOR = e.origin;
     const { seq, op, ...args } = e.data;
     const fn = Object.hasOwn(ops, op) ? ops[op] : null;
     let result = null;

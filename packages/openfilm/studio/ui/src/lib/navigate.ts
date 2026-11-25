@@ -19,7 +19,8 @@ export const keepKey = (to: string): string => {
 
 /** Go to an address of the app's: kept in the history (or in the place of the one shown), and told to the app. */
 export function go(to: string, replace = false): void {
-  if (to !== location.pathname) (replace ? history.replaceState : history.pushState).call(history, null, '', keepKey(to));
+  const current = location.pathname + location.search;
+  if (to !== current) (replace ? history.replaceState : history.pushState).call(history, null, '', keepKey(to));
   window.dispatchEvent(new PopStateEvent('popstate'));
 }
 
@@ -29,8 +30,10 @@ export function openProject(projectId: string): void {
   if (tabs) tabs.open(projectId); else go(`/projects/${projectId}`);
 }
 
-/** The project shown was deleted: its tab closes (with tabs), or back to the last project. */
+/** The project shown was deleted: its tab closes (with tabs), or back to the workspace/last project. */
 export function leaveProject(): void {
   const tabs = studioHost?.tabs ?? null;
-  if (tabs) tabs.report({ gone: true }); else go('/', true);
+  if (tabs) tabs.report({ gone: true });
+  else if (!new URLSearchParams(location.search).has('key')) go('/projects', true);
+  else go('/', true);
 }

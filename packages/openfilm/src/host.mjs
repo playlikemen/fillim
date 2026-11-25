@@ -91,9 +91,9 @@ const TYPES = {
  * `grade(file, luts, time)` says a video graded by LUT files (SPEC.md `--of-lut`), of which a clip plays `time` ([in,
  * out] source seconds, or null): the key of its graded copy (seekable.mjs gradeKey) and the source second it starts at
  * (`from`) once it is made, `making` while it is, null when it is played as it is. Without it, every video is.
- * @param {string} root @param {{ inject?: string, timelineInject?: string, staleRevisionPage?: string, headers?: Record<string, string>, swap?: (file: string, query?: URLSearchParams, source?: string) => string | null, missed?: (file: string) => void, grade?: Grade, timeline?: string, renderRanges?: [number, number][] }} [options]
+ * @param {string} root @param {{ inject?: string, timelineInject?: string, staleRevisionPage?: string, headers?: Record<string, string> | ((req: import('node:http').IncomingMessage) => Record<string, string>), swap?: (file: string, query?: URLSearchParams, source?: string) => string | null, missed?: (file: string) => void, grade?: Grade, timeline?: string, renderRanges?: [number, number][] }} [options]
  */
-export function folderFiles(root, { inject = `<script>${HOST_FLAG}</script>`, timelineInject = inject, staleRevisionPage, headers: extraHeaders = {}, swap, missed, grade, timeline, renderRanges } = {}) {
+export function folderFiles(root, { inject = `<script>${HOST_FLAG}</script>`, timelineInject = inject, staleRevisionPage, headers: extraHeadersOption = {}, swap, missed, grade, timeline, renderRanges } = {}) {
   root = resolve(root);
   const rootFilm = join(root, FILM_FILE);
   const scope = renderRanges ? `<script>window.filmHost.renderRanges=${JSON.stringify(renderRanges)}</script>` : '';
@@ -101,6 +101,7 @@ export function folderFiles(root, { inject = `<script>${HOST_FLAG}</script>`, ti
     injectFirst(holdPages(html), timelineInject + (main ? scope : '') + filmStart(readFilmFile(html).doc?.stage ?? DEFAULT_STAGE));
   const frozen = timeline === undefined ? null : timelinePage(timeline, true);
   return (req, res, path, query) => {
+    const extraHeaders = typeof extraHeadersOption === 'function' ? extraHeadersOption(req) : extraHeadersOption;
     if (serveVision(req, res, path, extraHeaders)) return true;
     /* beside any film, wherever in the folder it is (its page asks for them relative to itself) */
     if (path.endsWith('/__film/timeline.mjs')) {

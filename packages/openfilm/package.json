@@ -1,16 +1,16 @@
 {
   "name": "openfilm",
   "version": "0.4.1",
-  "description": "The open source AI video agent: films as web pages, the skills that teach your coding agent to make them, the `openfilm` command, and Studio, the editor to change anything in them.",
+  "description": "Fillim / OpenFilm Studio: cloud AI film & video editor with Neon Postgres, Neon Auth, deterministic window.film shots, and multi-track NLE workbenches.",
   "license": "MIT",
-  "homepage": "https://openfilm.dev",
+  "homepage": "https://fillim.campusloop.space",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/openfilm/openfilm.git",
+    "url": "git+https://github.com/playlikemen/fillim.git",
     "directory": "packages/openfilm"
   },
   "bugs": {
-    "url": "https://github.com/openfilm/openfilm/issues"
+    "url": "https://github.com/playlikemen/fillim/issues"
   },
   "keywords": [
     "video",
@@ -78,7 +78,11 @@
   },
   "dependencies": {
     "@mediapipe/tasks-vision": "1.2.2",
+    "@neondatabase/auth": "0.7.0-beta",
+    "@neondatabase/serverless": "1.2.1",
+    "jose": "6.2.18",
     "onnxruntime-web": "1.31.1",
+    "pg": "8.23.1",
     "playwright-core": "1.61.1"
   },
   "scripts": {
@@ -106,6 +110,7 @@
     "@tiptap/react": "3.32.0",
     "@tiptap/starter-kit": "3.32.0",
     "@types/node": "^22.20.5",
+    "@types/pg": "8.23.1",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^5.2.0",

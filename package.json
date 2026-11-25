@@ -1,7 +1,24 @@
 {
-  "name": "openfilm-monorepo",
+  "name": "fillim",
   "private": true,
-  "description": "OpenFilm: the open source AI video agent. The `openfilm` package (the format, the CLI and Studio), the desktop app, and what the clients share with the OpenFilm service.",
+  "description": "Fillim — Cloud AI Film Studio & SaaS built on OpenFilm, powered by Neon Lakebase Postgres and Neon Auth.",
+  "homepage": "https://fillim.campusloop.space",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/playlikemen/fillim.git"
+  },
+  "bugs": {
+    "url": "https://github.com/playlikemen/fillim/issues"
+  },
+  "keywords": [
+    "fillim",
+    "openfilm",
+    "ai-video",
+    "video-editor",
+    "motion-graphics",
+    "neon",
+    "saas"
+  ],
   "license": "MIT",
   "type": "module",
   "packageManager": "pnpm@9.15.9",
@@ -21,7 +38,8 @@
   },
   "devDependencies": {
     "@changesets/changelog-github": "0.5.2",
-    "@changesets/cli": "2.31.1"
+    "@changesets/cli": "2.31.1",
+    "@neon/config": "1.14.7"
   },
   "pnpm": {
     "overrides": {

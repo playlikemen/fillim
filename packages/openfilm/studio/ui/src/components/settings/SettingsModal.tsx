@@ -38,9 +38,9 @@ const navNow = (): Array<{ group: 'settings' | 'help'; sections: SettingsSection
 
 /** where OpenFilm lives, linked at the foot of the nav */
 const LINKS = [
-  { label: 'settings.links.github', href: 'https://github.com/openfilm/openfilm' },
+  { label: 'settings.links.github', href: 'https://github.com/playlikemen/fillim' },
   { label: 'settings.links.examples', href: 'https://github.com/openfilm/examples' },
-  { label: 'settings.links.site', href: 'https://openfilm.dev' },
+  { label: 'settings.links.site', href: 'https://fillim.campusloop.space' },
 ];
 
 const SECTION_ICON: Record<SettingsSection, React.ReactNode> = {

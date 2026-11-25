@@ -203,10 +203,10 @@ export async function openProject(path, { create = true } = {}) {
   });
 }
 
-/** A new project in the library: "Untitled", "Untitled 2", … never an existing folder. */
-export async function createProject(name = 'Untitled') {
+/** A new project in the library: "Untitled", "Untitled 2", … never an existing folder. @param {string} [name] @param {string} [baseDir] */
+export async function createProject(name = 'Untitled', baseDir = libraryRoot()) {
   const clean = folderName(name);
-  const root = libraryRoot();
+  const root = baseDir;
   requireNewProjectFolder(root);
   await mkdir(root, { recursive: true });
   let candidate = join(root, clean);
@@ -253,12 +253,12 @@ async function rebaseCopyLinks(/** @type {string} */ source, /** @type {string} 
 }
 
 /** Copy the current work into the library, with fresh version and chat history and its own project id. */
-export async function duplicateProject(/** @type {string} */ id, /** @type {string | undefined} */ name) {
+export async function duplicateProject(/** @type {string} */ id, /** @type {string | undefined} */ name, /** @type {string} */ baseDir = libraryRoot()) {
   const source = (await readState()).recent.find((r) => r.id === id);
   if (!source) throw new ProjectError('no such project', 404);
   if (projectMissing(source.path)) throw new ProjectError('The project is missing.', 410);
   const clean = folderName(name ?? `${basename(source.path)} copy`);
-  const root = resolve(libraryRoot());
+  const root = resolve(baseDir);
   requireNewProjectFolder(root);
   if (staysInside(relative(source.path, root))) throw new ProjectError('The projects library cannot be inside the project being copied.', 409);
   await mkdir(root, { recursive: true });

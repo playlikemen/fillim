@@ -38,7 +38,12 @@
   /* a page inside the timeline page (a clip of the film) has the film's own page for parent, not the editor: it says
      nothing (a message to the editor's origin would only be refused) */
   try { if (parent !== window && parent.location.origin === location.origin) return; } catch { /* the parent is the editor */ }
-  const EDITOR = __EDITOR__;
+  const EDITORS = __EDITOR__;
+  const editorList = Array.isArray(EDITORS) ? EDITORS : [EDITORS];
+  const refOrigin = (() => { try { return typeof document !== 'undefined' && document.referrer ? new URL(document.referrer).origin : ''; } catch { return ''; } })();
+  let EDITOR = (refOrigin && editorList.includes(refOrigin) ? refOrigin : '')
+    || (typeof location !== 'undefined' && location.protocol === 'https:' && editorList.find((o) => o.startsWith('https://')))
+    || editorList[0];
   const post = (message) => parent.postMessage({ source: 'openfilm-film', ...message }, EDITOR);
   const fail = (error) => post({ type: 'error', message: String(error?.message ?? error ?? 'the film failed') });
   window.addEventListener('error', (e) => fail(e.error ?? e.message));
@@ -306,7 +311,8 @@
   }
 
   window.addEventListener('message', async (e) => {
-    if (e.origin !== EDITOR || e.data?.source !== 'openfilm-studio') return;
+    if (!editorList.includes(e.origin) || e.data?.source !== 'openfilm-studio') return;
+    EDITOR = e.origin;
     const m = e.data;
     if (m.type === 'clock') { post({ type: 'clock', ping: m.ping, now: clock() }); return; }
     /* a refresh draws this page as shown, the next one is on screen */

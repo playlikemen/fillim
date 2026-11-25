@@ -36,6 +36,7 @@ process.on('unhandledRejection', (e) => {
 
 const server = filmServer({
   editorOrigin: workerData.editorOrigin,
+  publicEditorOrigin: workerData.publicEditorOrigin ?? '',
   rootOf: (token) => roots.get(token) ?? new Promise((done) => {
     const id = ++asks;
     asked.set(id, (root) => { if (root) roots.set(token, root); done(root); });

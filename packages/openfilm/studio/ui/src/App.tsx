@@ -1,12 +1,12 @@
 /**
- * Studio is one place: a project (/projects/<id>). The projects are a popover inside it; `/` goes to the project
- * opened last, or (none left, or only ones whose folder is gone) shows the Projects window on its own, with "New
- * project" in it: no folder is made that the person did not ask for. The address is the state, so the agent's
- * `openfilm open` (which sends the page to a project) and the browser's back button both work.
- *
- * In an app with tabs (lib/host.ts `tabs`) this page is one project's tab: a project picked opens in its own tab (the
- * app's to open), `/` is the projects (the window with no tab open), and `openfilm open` is the app's to settle (every
- * tab hears it).
+ * Fillim / OpenFilm Studio root router:
+ * - In SaaS mode (Neon Postgres + Neon Auth active, without a local CLI ?key=):
+ *   `/`             -> Fillim SaaS Landing Page
+ *   `/auth`         -> Neon Auth Sign-In / Sign-Up
+ *   `/projects`     -> Authenticated Cloud Workspace Dashboard
+ *   `/projects/:id` -> Authenticated Studio Editor
+ * - In local CLI / Desktop mode (?key=... or studioHost or non-SaaS):
+ *   Preserves OpenFilm Studio's original single-user behavior.
  */
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import { api, listen, studioConnection } from './api';
@@ -22,41 +22,74 @@ import { sourcesApi } from './lib/project-sources';
 import { LIST_WAIT_MS, within } from './lib/projects-page';
 import { afterPaintIdle } from './lib/after-paint-idle';
 import { loadCanvas } from './components/canvas/load';
+import { fetchSaasConfig, fetchSaasMe, saasSignOut, type SaasConfig, type SaasUser } from './saas/auth-client';
+import { LandingPage } from './saas/LandingPage';
+import { AuthPage } from './saas/AuthPage';
+import { WorkspaceDashboard } from './saas/WorkspaceDashboard';
 
 const projectIn = (path: string) => /^\/projects\/([\w-]+)/.exec(path)?.[1] ?? null;
+const hasLocalAuth = () => Boolean(studioHost || new URLSearchParams(location.search).has('key'));
 
 export function App() {
-  /* the app's tabs, when Studio is a tab of an app's window */
   const tabs = studioHost?.tabs ?? null;
-  /* the address is told by `popstate`, the browser's own and lib/navigate's `go` */
   const [path, setPath] = useState(location.pathname);
+  const [search, setSearch] = useState(location.search);
+  const localMode = hasLocalAuth();
 
-  /* the examples and skills, read as Studio opens: a gallery opened later shows them at once */
-  useEffect(() => { sourcesApi.preload(); }, []);
-  const id = projectIn(path);
-  /* The launcher is usable first. Without a project, warm the board's code for the examples' canvas previews; a
-     project's page warms its canvas itself (shell/workbenches), after the edit has loaded. */
-  const home = id == null;
-  useEffect(() => (home ? afterPaintIdle(() => { void loadCanvas().catch(() => {}); }) : undefined), [home]);
+  const [saasConfig, setSaasConfig] = useState<SaasConfig>({
+    enabled: !localMode,
+    authProxyPath: '/api/auth',
+    repoUrl: 'https://github.com/playlikemen/fillim',
+  });
+  const [saasUser, setSaasUser] = useState<SaasUser | null>(null);
+  const [saasResolved, setSaasResolved] = useState(localMode);
 
   useEffect(() => {
-    const onPop = () => setPath(location.pathname);
+    const onPop = () => {
+      setPath(location.pathname);
+      setSearch(location.search);
+    };
     window.addEventListener('popstate', onPop);
-    /* `openfilm open` while this page is open: show the project it opened (with tabs, the app says which tab does) */
+    return () => window.removeEventListener('popstate', onPop);
+  }, []);
+
+  useEffect(() => {
+    if (localMode) return;
+    let alive = true;
+    void Promise.all([fetchSaasConfig(), fetchSaasMe()]).then(([cfg, me]) => {
+      if (!alive) return;
+      setSaasConfig(cfg);
+      setSaasUser(me.user);
+      setSaasResolved(true);
+    });
+    return () => { alive = false; };
+  }, [localMode]);
+
+  const saasMode = !localMode && saasConfig.enabled;
+  const studioAuthenticated = localMode || (saasResolved && (!saasConfig.enabled || saasUser !== null));
+
+  useEffect(() => {
+    if (!studioAuthenticated) return;
+    sourcesApi.preload();
+  }, [studioAuthenticated]);
+
+  const id = projectIn(path);
+  const home = id == null;
+  useEffect(() => (studioAuthenticated && home ? afterPaintIdle(() => { void loadCanvas().catch(() => {}); }) : undefined), [studioAuthenticated, home]);
+
+  useEffect(() => {
+    if (!studioAuthenticated) return;
     const stop = listen('events', (event) => {
       if (event.type !== 'open') return;
       if (tabs) tabs.openRequest(event.to); else go(event.to);
     }, { watch: true });
-    return () => { window.removeEventListener('popstate', onPop); stop(); };
-  }, []);
+    return () => stop();
+  }, [studioAuthenticated, tabs]);
 
-  /* no project in the address: the one opened last that is still there, else the Projects window (`none`); with
-     tabs, the projects (no tab is open) */
   const [none, setNone] = useState(false);
   useEffect(() => {
-    if (id || tabs) return;
+    if (saasMode || !studioAuthenticated || id || tabs) return;
     let alive = true;
-    /* the list not read (refused, or no answer in time): the Projects window, which says so and tries again */
     void within(api.projects(), LIST_WAIT_MS).then((projects) => {
       if (!alive) return;
       const last = projects.find((p) => !p.missing);
@@ -64,7 +97,84 @@ export function App() {
       else setNone(true);
     }, () => { if (alive) setNone(true); });
     return () => { alive = false; setNone(false); };
-  }, [id]);
+  }, [saasMode, studioAuthenticated, id, tabs]);
+
+  const handleSignOut = () => {
+    void saasSignOut().then(() => {
+      setSaasUser(null);
+      go('/', true);
+    });
+  };
+
+  if (saasMode) {
+    const params = new URLSearchParams(search);
+    const authMode = params.get('mode') === 'sign-up' || path === '/auth/sign-up' ? 'sign-up' : 'sign-in';
+    const nextPath = params.get('next');
+
+    if (path === '/' || path === '') {
+      return (
+        <LandingPage
+          user={saasUser}
+          repoUrl={saasConfig.repoUrl}
+          onLaunchAuth={(mode) => go(`/auth?mode=${mode}`)}
+          onOpenWorkspace={() => go('/projects')}
+        />
+      );
+    }
+
+    if (path === '/auth' || path === '/auth/sign-in' || path === '/auth/sign-up') {
+      if (saasUser) {
+        return (
+          <WorkspaceDashboard
+            user={saasUser}
+            onUserUpdated={setSaasUser}
+            onOpenProject={(nextId) => go(`/projects/${nextId}`)}
+            onHome={() => go('/')}
+            onSignOut={handleSignOut}
+          />
+        );
+      }
+      return (
+        <AuthPage
+          initialMode={authMode}
+          onBackHome={() => go('/')}
+          onSuccess={(u) => {
+            setSaasUser(u);
+            const safeNext = nextPath && nextPath.startsWith('/') && !nextPath.startsWith('//') ? nextPath : '/projects';
+            go(safeNext, true);
+          }}
+        />
+      );
+    }
+
+    if (!saasResolved) return <BrandLoadingScreen labelKey="projects.opening" />;
+
+    if (!saasUser) {
+      return (
+        <AuthPage
+          initialMode="sign-in"
+          onBackHome={() => go('/')}
+          onSuccess={(u) => {
+            setSaasUser(u);
+          }}
+        />
+      );
+    }
+
+    if (id) {
+      return <><ProjectPage key={id} projectId={id} /><ConnectionNotice /></>;
+    }
+
+    return (
+      <WorkspaceDashboard
+        user={saasUser}
+        onUserUpdated={setSaasUser}
+        onOpenProject={(nextId) => go(`/projects/${nextId}`)}
+        onHome={() => go('/')}
+        onSignOut={handleSignOut}
+      />
+    );
+  }
 
   const page = id ? <ProjectPage key={id} projectId={id} />
     : tabs ? <Launcher onOpen={openProject} />
