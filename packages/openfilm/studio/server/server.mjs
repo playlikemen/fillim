@@ -412,11 +412,14 @@ export async function startStudio({ port = 4747, key, openBrowser = systemBrowse
       /* a page with the key in its address signs this browser in; one signed in without it gets it in its address */
       if (signingIn) return sendEditor(res, editorDir, path, { 'set-cookie': signIn(signingIn) });
       const session = cookieKey(req);
-      if (session) {
+      if (session && !(saasEnabled() && isPublicReq(req))) {
         res.writeHead(302, { location: keyed(path + url.search, session), 'referrer-policy': 'no-referrer' });
         return res.end();
       }
-      return sendEditor(res, editorDir, path);
+      const clearLegacy = session && saasEnabled() && isPublicReq(req)
+        ? { 'set-cookie': [`${COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`, `${FRAMED}=; Path=/; HttpOnly; Secure; SameSite=None; Partitioned; Max-Age=0`] }
+        : undefined;
+      return sendEditor(res, editorDir, path, clearLegacy);
     }
 
     const caller = await authorize(req);
