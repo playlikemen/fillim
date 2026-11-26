@@ -81,6 +81,7 @@ import { binDelete, binList, binRestore, recycle } from './recycle-bin.mjs';
 import { closeDb, deleteOwnedProject, ensureSchema, ensureUser, getProjectOwner, getUserProfile, listOwnedProjects, recordUsage, renameOwnedProject, touchOwnedProject, upsertOwnedProject } from './saas/db.mjs';
 import { fetchUpstreamSession, proxyNeonAuth, resolveSaasUser, saasEnabled, saasSetCookieHeader, safeUserDir, signSaasCookieValue, verifyNeonJwt } from './saas/auth.mjs';
 import { aiChatConfigured, loadChatHistory, runProjectDirectorChat, saveChatHistory } from './saas/chat.mjs';
+import { billingEnabled, createOrder, handleWebhook, publicPlans, readRaw, verifyPayment } from './saas/payments.mjs';
 import { allowProjectSkill, appIconIn, revocationOf, revokedNow, skillFiles, commandsIn, coreSkills, elementIn, keeps, listSkills, offeredSkills, ownSkills, pluginRuns, projectSkillAllowed, pluginWrites, removeSkill, setPluginRuns, setPluginWrites, setSkillCover, setSkillOn, skillOrigins, skillsOff, thisPlatform } from '../../src/skills.mjs';
 import { startPluginPages } from './plugin-pages.mjs';
 import { startPluginPrograms } from './plugin-programs.mjs';
@@ -348,8 +349,16 @@ export async function startStudio({ port = 4747, key, openBrowser = systemBrowse
     }
     if (path === '/api/media/fillim-launch.mp4' && (req.method === 'GET' || req.method === 'HEAD')) {
       const videoFile = fileURLToPath(new URL('../ui/assets-launch/fillim-launch.mp4', import.meta.url));
-      const downloadName = url.searchParams.get('download') === '1' ? 'fillim-launch-producthunt.mp4' : undefined;
+      const downloadName = url.searchParams.get('download') === '1' ? 'fillim-launch.mp4' : undefined;
       return sendMedia(req, res, videoFile, { keep: true, downloadName });
+    }
+    if ((path === '/robots.txt' || path === '/sitemap.xml') && (req.method === 'GET' || req.method === 'HEAD')) {
+      const site = 'https://fillim.campusloop.space';
+      const body = path === '/robots.txt'
+        ? `User-agent: *\nAllow: /\nDisallow: /projects\nDisallow: /p/\nAllow: /api/media/\nDisallow: /api/\nSitemap: ${site}/sitemap.xml\n`
+        : `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n  <url><loc>${site}/</loc><changefreq>weekly</changefreq><priority>1.0</priority></url>\n  <url><loc>${site}/auth</loc><changefreq>monthly</changefreq><priority>0.5</priority></url>\n</urlset>\n`;
+      res.writeHead(200, { 'content-type': path === '/robots.txt' ? 'text/plain; charset=utf-8' : 'application/xml; charset=utf-8', 'cache-control': 'public, max-age=3600' });
+      return void res.end(req.method === 'HEAD' ? undefined : body);
     }
     if (path === '/api/media/fillim-launch-poster.jpg' && (req.method === 'GET' || req.method === 'HEAD')) {
       return sendMedia(req, res, fileURLToPath(new URL('../ui/assets-launch/fillim-launch-poster.jpg', import.meta.url)), { keep: true });
@@ -389,6 +398,29 @@ export async function startStudio({ port = 4747, key, openBrowser = systemBrowse
       const clearHeader = saasSetCookieHeader('', { secure: isPublicReq(req), clear: true });
       res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'set-cookie': clearHeader });
       return res.end(JSON.stringify({ ok: true }));
+    }
+    /* ── billing (saas/payments.mjs): Razorpay one-time passes. The webhook is signed by Razorpay, not a person, so it
+       needs no cookie; every other billing call is the signed-in SaaS user's own ── */
+    if (path === '/api/saas/billing/config' && req.method === 'GET') {
+      return json(res, 200, { enabled: saasEnabled() && billingEnabled(), plans: publicPlans() });
+    }
+    if (path === '/api/saas/billing/webhook' && req.method === 'POST') {
+      const raw = await readRaw(req).catch(() => null);
+      if (!raw) throw new HttpError(413, 'request body too large');
+      const out = await handleWebhook(raw, String(req.headers['x-razorpay-signature'] ?? ''));
+      if ('error' in out) throw new HttpError(out.status ?? 400, String(out.error));
+      return json(res, 200, out);
+    }
+    if ((path === '/api/saas/billing/order' || path === '/api/saas/billing/verify') && req.method === 'POST') {
+      if (!saasEnabled()) throw new HttpError(404, 'SaaS mode is not enabled');
+      if (req.headers.origin && !isAllowedOrigin(req.headers.origin)) throw new HttpError(403, 'not from Studio');
+      const user = await resolveSaasUser(req, saasSecret);
+      if (!user) throw new HttpError(401, 'Sign in required');
+      await ensureUser(user);
+      const body = /** @type {any} */ (await readJson(req, 64 << 10));
+      const out = path.endsWith('/order') ? await createOrder(user, body?.plan) : await verifyPayment(user, body);
+      if ('error' in out) throw new HttpError(out.status ?? 400, String(out.error));
+      return json(res, 200, path.endsWith('/order') ? /** @type {any} */ (out).order : { ...out, user: await getUserProfile(user.id) });
     }
     /* a browser signs in with the key it was given: Studio's (the person's), or the agents' (a browser an agent opened
        Studio in, which has all but the person's say) */

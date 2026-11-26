@@ -85,6 +85,21 @@ export async function ensureSchema() {
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )`,
       `CREATE INDEX IF NOT EXISTS idx_saas_usage_user ON saas_usage_events (user_id, created_at DESC)`,
+      /* billing (payments.mjs): a paid pass lasts until plan_expires_at, then the plan reads as free */
+      `ALTER TABLE saas_users ADD COLUMN IF NOT EXISTS plan_expires_at TIMESTAMPTZ`,
+      `CREATE TABLE IF NOT EXISTS saas_payments (
+        id BIGSERIAL PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES saas_users(id) ON DELETE CASCADE,
+        plan TEXT NOT NULL,
+        order_id TEXT NOT NULL UNIQUE,
+        payment_id TEXT,
+        amount INTEGER NOT NULL,
+        currency TEXT NOT NULL DEFAULT 'INR',
+        status TEXT NOT NULL DEFAULT 'created',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        paid_at TIMESTAMPTZ
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_saas_payments_user ON saas_payments (user_id, created_at DESC)`,
     ];
     for (const stmt of statements) {
       await ddl.query(stmt, []);
@@ -122,7 +137,9 @@ export async function ensureUser(user) {
 export async function getUserProfile(userId) {
   await ensureSchema();
   const userRows = await query(
-    `SELECT u.id, u.email, u.name, u.plan, u.credits_remaining, u.created_at, u.updated_at,
+    `SELECT u.id, u.email, u.name,
+            CASE WHEN u.plan_expires_at IS NOT NULL AND u.plan_expires_at < NOW() THEN 'free' ELSE u.plan END AS plan,
+            u.plan_expires_at, u.credits_remaining, u.created_at, u.updated_at,
             (SELECT COUNT(*)::int FROM saas_projects p WHERE p.owner_id = u.id) AS project_count
        FROM saas_users u
       WHERE u.id = $1`,
