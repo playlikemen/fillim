@@ -12,7 +12,7 @@
  * `topBar`), after the edit's. The layout's menu (shell/layout) is the page's: it is the first of the buttons on the right.
  */
 import * as React from 'react';
-import { LayoutGrid, MonitorDown, Puzzle } from 'lucide-react';
+import { LayoutGrid, MonitorDown, Puzzle, Sparkles } from 'lucide-react';
 import { api, ApiError, type ProjectFilm } from '@/api';
 import { useT } from '@/i18n';
 import { readCanvasDoc } from '@/lib/canvas';
@@ -176,6 +176,21 @@ function Bar({ frame, loaded }: { frame: ReturnType<typeof useProjectFrame>; loa
             {t(canvasOpen ? 'canvas.title' : 'canvas.editTitle')}
           </button>
         </Tooltip> : null}
+        {frame.webDirectorAvailable && (
+          <button
+            type="button"
+            onClick={() => frame.setDirectorOpen(!frame.directorOpen)}
+            aria-pressed={frame.directorOpen}
+            className={`flex h-[26px] shrink-0 items-center gap-1.5 rounded-md border px-2.5 text-[12px] font-semibold transition ${
+              frame.directorOpen
+                ? 'border-[#ca281b] bg-[#ca281b] text-[#fffaf8]'
+                : 'border-[var(--border)] bg-[var(--bg-hover)] text-[var(--text)] hover:border-[#ca281b]'
+            }`}
+          >
+            <Sparkles size={13} />
+            AI Chat
+          </button>
+        )}
       </div>
       <div aria-hidden className="shrink-0 self-stretch" style={{ width: 'var(--titlebar-right-x)' }} />
     </div>

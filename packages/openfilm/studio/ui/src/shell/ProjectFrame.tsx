@@ -15,6 +15,7 @@
 import * as React from 'react';
 import { api, PREFS_EVENT, type MediaMade, type MissingMedia } from '@/api';
 import { useT } from '@/i18n';
+import { StudioChatDrawer } from '@/saas/StudioChatDrawer';
 import { batchMap } from '@/lib/batch-map';
 import { decodes, type PlayCheck } from '@/lib/decodes';
 import { studioHost, type StudioCommand } from '@/lib/host';
@@ -310,6 +311,18 @@ export function useProjectFrame(projectId: string) {
 
   /* ── the page's own windows (the projects, Settings, the desktop app's dialog), and the project's name (shell/top-bar) ── */
   const windows = usePageWindows(loaded);
+  const webDirectorAvailable = !studioHost?.panel;
+  const [directorOpen, setDirectorOpenState] = React.useState(() => {
+    if (studioHost?.panel) return false;
+    try {
+      const saved = localStorage.getItem('fillim.director.open');
+      return saved == null ? true : saved === '1';
+    } catch { return true; }
+  });
+  const setDirectorOpen = React.useCallback((open: boolean) => {
+    setDirectorOpenState(open);
+    try { localStorage.setItem('fillim.director.open', open ? '1' : '0'); } catch { /* ignore */ }
+  }, []);
 
   /* ── links (lib/links): the workbench that shows the link's file (studio/hub workbenchOpens: what each said it shows,
      `provide`'s `opens`) is shown, unless it is, and told to show it (`show`, kept until it is in the page); a file no
@@ -380,6 +393,9 @@ export function useProjectFrame(projectId: string) {
     ...layout,
     ...library,
     ...windows,
+    webDirectorAvailable,
+    directorOpen,
+    setDirectorOpen,
   };
 }
 
@@ -416,12 +432,23 @@ export function ProjectFrame({ projectId }: { projectId: string }) {
       ) : null}
       {!loaded && !failure ? <BrandLoadingScreen labelKey="projects.opening" /> : null}
       <div className="workspace-shell flex flex-col bg-[var(--bg-app)]" style={read ? undefined : { display: 'none' }}>
-        <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+        <div className="relative flex min-h-0 min-w-0 flex-1 flex-row">
           <div className="relative z-10 grid min-h-0 min-w-0 flex-1 bg-[var(--dock-line)]" style={{ gridTemplateColumns: 'minmax(0, 1fr)', gridTemplateRows: 'auto minmax(0, 1fr)', gridTemplateAreas: '"bar" "main"' }}>
             <TopBar frame={state} />
             {told && slots ? <><Arrangement frame={state} /><AmongPanes frame={state} /></> : null}
             <InPanesPlace frame={state} />
           </div>
+          {state.webDirectorAvailable && (
+            <StudioChatDrawer
+              projectId={projectId}
+              open={state.directorOpen}
+              onClose={() => state.setDirectorOpen(false)}
+              onFilmUpdated={() => {
+                void state.readFilm();
+                void state.listFiles();
+              }}
+            />
+          )}
         </div>
         <div ref={slotRefs.over} style={PLACE} />
         <PageWindows frame={state} />

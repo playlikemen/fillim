@@ -21,3 +21,7 @@ dist/
 # OS and editors
 .DS_Store
 *.log
+
+# local design/agent tooling
+packages/openfilm/.impeccable/
+.agents/skills/impeccable/

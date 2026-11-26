@@ -22,7 +22,7 @@ import { sourcesApi } from './lib/project-sources';
 import { LIST_WAIT_MS, within } from './lib/projects-page';
 import { afterPaintIdle } from './lib/after-paint-idle';
 import { loadCanvas } from './components/canvas/load';
-import { fetchSaasConfig, fetchSaasMe, saasSignOut, type SaasConfig, type SaasUser } from './saas/auth-client';
+import { completeOAuthCallback, fetchSaasConfig, fetchSaasMe, saasSignOut, type SaasConfig, type SaasUser } from './saas/auth-client';
 import { LandingPage } from './saas/LandingPage';
 import { AuthPage } from './saas/AuthPage';
 import { WorkspaceDashboard } from './saas/WorkspaceDashboard';
@@ -43,6 +43,13 @@ export function App() {
   });
   const [saasUser, setSaasUser] = useState<SaasUser | null>(null);
   const [saasResolved, setSaasResolved] = useState(localMode);
+  const [oauthError, setOauthError] = useState<string | null>(null);
+  const [oauthPending, setOauthPending] = useState(() => (
+    !localMode && (
+      location.pathname === '/auth/callback'
+      || new URLSearchParams(location.search).has('neon_auth_session_verifier')
+    )
+  ));
 
   useEffect(() => {
     const onPop = () => {
@@ -56,6 +63,34 @@ export function App() {
   useEffect(() => {
     if (localMode) return;
     let alive = true;
+    const params = new URLSearchParams(location.search);
+    const isCallback = location.pathname === '/auth/callback'
+      || params.has('neon_auth_session_verifier')
+      || (location.pathname.startsWith('/auth') && (params.has('error') || params.has('error_description')));
+
+    if (isCallback) {
+      setOauthPending(true);
+      void Promise.all([fetchSaasConfig(), completeOAuthCallback(location.search)]).then(([cfg, res]) => {
+        if (!alive) return;
+        setSaasConfig(cfg);
+        if (res.user) {
+          setSaasUser(res.user);
+          setOauthError(null);
+          setOauthPending(false);
+          setSaasResolved(true);
+          go('/projects', true);
+        } else {
+          setOauthError(res.error || 'OAuth sign-in did not complete.');
+          setOauthPending(false);
+          setSaasResolved(true);
+          if (location.pathname === '/auth/callback') {
+            go('/auth?mode=sign-in', true);
+          }
+        }
+      });
+      return () => { alive = false; };
+    }
+
     void Promise.all([fetchSaasConfig(), fetchSaasMe()]).then(([cfg, me]) => {
       if (!alive) return;
       setSaasConfig(cfg);
@@ -111,6 +146,10 @@ export function App() {
     const authMode = params.get('mode') === 'sign-up' || path === '/auth/sign-up' ? 'sign-up' : 'sign-in';
     const nextPath = params.get('next');
 
+    if (oauthPending || path === '/auth/callback') {
+      return <BrandLoadingScreen labelKey="projects.opening" />;
+    }
+
     if (path === '/' || path === '') {
       return (
         <LandingPage
@@ -137,9 +176,11 @@ export function App() {
       return (
         <AuthPage
           initialMode={authMode}
+          initialError={oauthError}
           onBackHome={() => go('/')}
           onSuccess={(u) => {
             setSaasUser(u);
+            setOauthError(null);
             const safeNext = nextPath && nextPath.startsWith('/') && !nextPath.startsWith('//') ? nextPath : '/projects';
             go(safeNext, true);
           }}
@@ -153,9 +194,11 @@ export function App() {
       return (
         <AuthPage
           initialMode="sign-in"
+          initialError={oauthError}
           onBackHome={() => go('/')}
           onSuccess={(u) => {
             setSaasUser(u);
+            setOauthError(null);
           }}
         />
       );

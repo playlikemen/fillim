@@ -80,6 +80,7 @@ import { captionTrackRoutes } from './caption-tracks.mjs';
 import { binDelete, binList, binRestore, recycle } from './recycle-bin.mjs';
 import { closeDb, deleteOwnedProject, ensureSchema, ensureUser, getProjectOwner, getUserProfile, listOwnedProjects, recordUsage, renameOwnedProject, touchOwnedProject, upsertOwnedProject } from './saas/db.mjs';
 import { fetchUpstreamSession, proxyNeonAuth, resolveSaasUser, saasEnabled, saasSetCookieHeader, safeUserDir, signSaasCookieValue, verifyNeonJwt } from './saas/auth.mjs';
+import { aiChatConfigured, loadChatHistory, runProjectDirectorChat, saveChatHistory } from './saas/chat.mjs';
 import { allowProjectSkill, appIconIn, revocationOf, revokedNow, skillFiles, commandsIn, coreSkills, elementIn, keeps, listSkills, offeredSkills, ownSkills, pluginRuns, projectSkillAllowed, pluginWrites, removeSkill, setPluginRuns, setPluginWrites, setSkillCover, setSkillOn, skillOrigins, skillsOff, thisPlatform } from '../../src/skills.mjs';
 import { startPluginPages } from './plugin-pages.mjs';
 import { startPluginPrograms } from './plugin-programs.mjs';
@@ -340,8 +341,18 @@ export async function startStudio({ port = 4747, key, openBrowser = systemBrowse
       return json(res, 200, {
         enabled: saasEnabled(),
         authProxyPath: '/api/auth',
+        oauthProviders: ['google', 'microsoft', 'github'],
+        aiChatEnabled: aiChatConfigured(),
         repoUrl: 'https://github.com/playlikemen/fillim',
       });
+    }
+    if (path === '/api/media/fillim-launch.mp4' && (req.method === 'GET' || req.method === 'HEAD')) {
+      const videoFile = fileURLToPath(new URL('../ui/assets-launch/fillim-launch.mp4', import.meta.url));
+      const downloadName = url.searchParams.get('download') === '1' ? 'fillim-launch-producthunt.mp4' : undefined;
+      return sendMedia(req, res, videoFile, { keep: true, downloadName });
+    }
+    if (path === '/api/media/fillim-launch-poster.jpg' && (req.method === 'GET' || req.method === 'HEAD')) {
+      return sendMedia(req, res, fileURLToPath(new URL('../ui/assets-launch/fillim-launch-poster.jpg', import.meta.url)), { keep: true });
     }
     if (path.startsWith('/api/auth/')) {
       return proxyNeonAuth(req, res, path.slice('/api/auth/'.length), url, {
@@ -1245,9 +1256,43 @@ export async function startStudio({ port = 4747, key, openBrowser = systemBrowse
     };
     /* film.html missing from a folder still there (an agent writing it again, or it lost): the project stays open, and
        says so; its version history is there to bring film.html back from; what writes the film waits for it */
-    const filmOptional = (!rest && req.method === 'GET') || rest === 'opened' || parts[2] === 'history';
+    const filmOptional = (!rest && req.method === 'GET') || rest === 'opened' || parts[2] === 'history' || parts[2] === 'ai-chat';
     if (!(!rest && req.method === 'DELETE')) {
       requireProject({ film: !filmOptional });
+    }
+    if (parts[2] === 'ai-chat' && parts.length === 3) {
+      if (req.method === 'GET') {
+        return json(res, 200, { enabled: aiChatConfigured(), messages: loadChatHistory(project.path) });
+      }
+      if (req.method === 'DELETE') {
+        saveChatHistory(project.path, []);
+        return json(res, 200, { messages: [] });
+      }
+      if (req.method === 'POST') {
+        const body = /** @type {{ prompt?: string } | null} */ (await readJson(req).catch(() => null));
+        try {
+          const result = await runProjectDirectorChat({
+            project,
+            prompt: String(body?.prompt ?? ''),
+            onFilesChanged: (changed) => {
+              const rev = Date.now().toString(36);
+              if (changed.some((p) => p === 'film.html' || p.endsWith('.html'))) {
+                watchers.emit(project.path, { type: 'film', rev });
+              }
+              watchers.emit(project.path, { type: 'files' });
+            },
+          });
+          if (saasUser) {
+            await recordUsage(saasUser.id, 'ai.director', project.id, -1, {
+              model: result.model,
+              changedCount: result.changedFiles.length,
+            }).catch(() => {});
+          }
+          return json(res, 200, result);
+        } catch (err) {
+          throw new HttpError(502, err instanceof Error ? err.message : 'AI Director request failed.');
+        }
+      }
     }
     /* ── subtitles: the film's lines, the person's subtitle style, translation (see captions.mjs) ── */
     if (await captionRoutes(req, res, project.path, rest, { translate: (root) => subtitleTranslator(root, { askAgent }), transcribe: await subtitleTranscriber() })) return;
@@ -2248,7 +2293,7 @@ async function sendPlayback(req, res, root, rel, url) {
  * A picture or a video from this computer, a range answered as one (a preview is seeked in); none: 404.
  * @param {import('node:http').IncomingMessage} req @param {import('node:http').ServerResponse} res @param {string | null | undefined} file
  */
-function sendMedia(req, res, file, { keep = false, check = false } = {}) {
+function sendMedia(req, res, file, { keep = false, check = false, downloadName } = /** @type {{ keep?: boolean, check?: boolean, downloadName?: string }} */ ({})) {
   if (res.destroyed) return;
   if (!file || !existsSync(file) || !statSync(file).isFile()) throw new HttpError(404, 'no such file');
   const { size, mtimeMs } = statSync(file);
@@ -2273,7 +2318,8 @@ function sendMedia(req, res, file, { keep = false, check = false } = {}) {
     res.writeHead(416, { 'content-range': `bytes */${size}`, 'accept-ranges': 'bytes' }).end();
     return undefined;
   }
-  res.writeHead(range ? 206 : 200, { 'content-type': type, 'content-length': to - from + 1, 'accept-ranges': 'bytes', ...kept, ...(range ? { 'content-range': `bytes ${from}-${to}/${size}` } : {}) });
+  const disp = downloadName ? { 'content-disposition': `attachment; filename="${downloadName}"` } : {};
+  res.writeHead(range ? 206 : 200, { 'content-type': type, 'content-length': to - from + 1, 'accept-ranges': 'bytes', ...kept, ...disp, ...(range ? { 'content-range': `bytes ${from}-${to}/${size}` } : {}) });
   /* A cancelled preview is normal: pipeline closes its file; its callback deliberately ignores the error. */
   pipeline(createReadStream(file, { start: from, end: to }), res, () => {});
   return undefined;

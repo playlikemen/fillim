@@ -1,0 +1,58 @@
+name: deploy
+# Fillim production deploy (https://fillim.campusloop.space). Every push to main is typechecked and built on a
+# GitHub-hosted runner; if that passes, the self-hosted runner on the VPS (labels: self-hosted, fillim-vps) runs
+# scripts/deploy-vps.sh, which fast-forwards the live checkout, rebuilds, restarts the `fillim` user service and
+# rolls back on a failed health check. The VPS sits behind a Cloudflare Tunnel, so the runner polls GitHub and
+# nothing on the server is exposed for this.
+#
+# Only push / manual dispatch on playlikemen/fillim ever reach the VPS job: no pull_request trigger, and fork pull
+# requests need a maintainer's approval before any workflow runs (Settings → Actions → fork PR approval).
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+jobs:
+  verify:
+    if: github.repository == 'playlikemen/fillim'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter openfilm typecheck
+      - run: pnpm --filter openfilm build:ui
+
+  deploy:
+    needs: verify
+    if: github.repository == 'playlikemen/fillim' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, fillim-vps]
+    timeout-minutes: 20
+    environment:
+      name: production
+      url: https://fillim.campusloop.space
+    steps:
+      # The live checkout deploys itself; the runner's own workspace only supplies this commit's script.
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts/deploy-vps.sh
+          sparse-checkout-cone-mode: false
+      - run: bash scripts/deploy-vps.sh "$GITHUB_SHA"
+      - name: Public smoke test
+        run: |
+          for path in / /api/saas/config /api/media/fillim-launch-poster.jpg; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "https://fillim.campusloop.space$path")
+            echo "$path -> $code"
+            [ "$code" = 200 ] || { echo "::error::$path returned $code"; exit 1; }
+          done
